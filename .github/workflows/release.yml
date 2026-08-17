@@ -5,14 +5,16 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+  id-token: write
+
 jobs:
-  release:
+  build-and-release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,17 +33,80 @@ jobs:
         run: pytest tests/unit/ -q --ignore=tests/unit/test_desktop_publication.py --ignore=tests/unit/test_installer_publication.py --ignore=tests/unit/test_cosmetic_fixes.py --ignore=tests/unit/test_report_command_email.py
 
       - name: Generate version from tag
+        id: version
         run: |
           TAG=${GITHUB_REF#refs/tags/}
           VERSION=${TAG#v}
-          echo "Extracted version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "__version__ = '${VERSION}'" > _version_build.py
 
       - name: Create web_dist directory
-        run: mkdir -p web_dist
+        run: |
+          mkdir -p web_dist
+          echo 'placeholder' > web_dist/.gitkeep
 
       - name: Build package
+        env:
+          PIP_USER: "false"
+          PIP_PREFIX: ""
+          PYTHONUSERBASE: ""
         run: python -m build
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ steps.version.outputs.version }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  build-macos:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build macOS arm64 installer
+        run: |
+          VERSION=${{ needs.build-and-release.outputs.version }}
+          echo "Building macOS arm64 installer for version $VERSION"
+          pyinstaller \
+            --onedir \
+            --name rdst \
+            --paths=. \
+            --collect-all=shared \
+            --collect-all=features \
+            --hidden-import=mcp_server \
+            rdst.py
+          cd dist/rdst
+          ln -s rdst rdst-mcp
+          codesign --sign - --force --timestamp=none rdst || true
+          cd ../..
+          mkdir -p staging/rdst
+          cp -r dist/rdst/* staging/rdst/
+          tar -czf rdst-${VERSION}-macos-arm64.tar.gz -C staging rdst
+          echo "Created rdst-${VERSION}-macos-arm64.tar.gz"
+
+      - name: Upload macOS archive to GitHub release
+        run: gh release upload ${{ github.ref_name }} rdst-*-macos-arm64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
