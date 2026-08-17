@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build and test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r tests/requirements.txt
+          pip install build
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -x -q
+
+      - name: Generate version from tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+          echo "Extracted version: $VERSION"
+          echo "__version__ = '${VERSION}'" > _version_build.py
+
+      - name: Create web_dist directory
+        run: mkdir -p web_dist
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
